@@ -4,7 +4,7 @@ import type { ModelModalities } from "./config/models";
 import { createLogger } from "./logger";
 import { ensureProjectContext } from "./project";
 import { refreshAccessToken } from "./token";
-import type { AuthDetails, OAuthAuthDetails, Provider, ProviderModel } from "./types";
+import type { AuthDetails, OAuthAuthDetails, Provider, ProviderModel, ProviderModelCost } from "./types";
 import { getAntigravityHeaders } from "../constants";
 
 const log = createLogger("model-catalog");
@@ -59,18 +59,22 @@ function cloneProviderModels(models: Record<string, ProviderModel>): Record<stri
       id,
       {
         ...model,
-        cost: ((existingCost: any) => ({
-          input: existingCost?.input ?? 0,
-          output: existingCost?.output ?? 0,
-          cache: {
-            read: existingCost?.cache?.read ?? 0,
-            write: existingCost?.cache?.write ?? 0,
-          },
-          experimentalOver200K: existingCost?.experimentalOver200K,
-        }))(model.cost as any),
+        cost: normalizeCost(model.cost),
       },
     ]),
   );
+}
+
+function normalizeCost(existingCost?: ProviderModelCost): ProviderModelCost {
+  return {
+    input: existingCost?.input ?? 0,
+    output: existingCost?.output ?? 0,
+    cache: {
+      read: existingCost?.cache?.read ?? 0,
+      write: existingCost?.cache?.write ?? 0,
+    },
+    experimentalOver200K: existingCost?.experimentalOver200K,
+  };
 }
 
 function isClaudeModel(modelId: string): boolean {
@@ -167,7 +171,7 @@ function buildProviderModel(
   rawModelId: string,
   entry: CatalogModelEntry,
 ): ProviderModel {
-  const template = pickTemplateModel(provider, discoveredId) as any;
+  const template = pickTemplateModel(provider, discoveredId);
   const fallbackContext = isClaudeModel(rawModelId) ? DEFAULT_CLAUDE_CONTEXT : DEFAULT_GEMINI_CONTEXT;
   const fallbackOutput = isClaudeModel(rawModelId) ? DEFAULT_CLAUDE_OUTPUT : DEFAULT_GEMINI_OUTPUT;
   const modalities = normalizeModalities(entry, rawModelId);
@@ -193,14 +197,8 @@ function buildProviderModel(
       output: normalizeLimit(entry.maxOutputTokens, template?.limit?.output ?? fallbackOutput),
     },
     cost: {
-      input: template?.cost?.input ?? 0,
-      output: template?.cost?.output ?? 0,
-      cache: {
-        read: template?.cost?.cache?.read ?? 0,
-        write: template?.cost?.cache?.write ?? 0,
-      },
-      experimentalOver200K: template?.cost?.experimentalOver200K,
-    } as any,
+      ...normalizeCost(template?.cost),
+    },
   };
 }
 

@@ -61,7 +61,7 @@ function pickVerificationUrl(urls: string[]): string | undefined {
   return preferred ?? list[0];
 }
 
-function extractVerificationErrorDetails(body: string): {
+export function extractVerificationErrorDetails(body: string): {
   validationRequired: boolean;
   message?: string;
   verifyUrl?: string;

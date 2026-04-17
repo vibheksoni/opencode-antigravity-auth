@@ -6,7 +6,7 @@ export interface ModelThinkingConfig {
   thinkingBudget: number;
 }
 
-export interface ModelVariant {
+export interface ModelVariant extends Record<string, unknown> {
   thinkingLevel?: ModelThinkingLevel;
   thinkingConfig?: ModelThinkingConfig;
 }

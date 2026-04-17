@@ -142,6 +142,13 @@ export interface RateLimitStateV3 {
   [key: string]: number | undefined;
 }
 
+export type StoredRateLimitReason =
+  | "QUOTA_EXHAUSTED"
+  | "RATE_LIMIT_EXCEEDED"
+  | "MODEL_CAPACITY_EXHAUSTED"
+  | "SERVER_ERROR"
+  | "UNKNOWN";
+
 export interface AccountMetadataV1 {
   email?: string;
   refreshToken: string;
@@ -192,6 +199,7 @@ export interface AccountMetadataV3 {
   enabled?: boolean;
   lastSwitchReason?: "rate-limit" | "initial" | "rotation";
   rateLimitResetTimes?: RateLimitStateV3;
+  rateLimitReasons?: Record<string, StoredRateLimitReason>;
   coolingDownUntil?: number;
   cooldownReason?: CooldownReason;
   /** Per-account device fingerprint for rate limit mitigation */
@@ -402,6 +410,10 @@ function mergeAccountStorage(
           rateLimitResetTimes: {
             ...existingAcc.rateLimitResetTimes,
             ...acc.rateLimitResetTimes,
+          },
+          rateLimitReasons: {
+            ...existingAcc.rateLimitReasons,
+            ...acc.rateLimitReasons,
           },
           lastUsed: Math.max(existingAcc.lastUsed || 0, acc.lastUsed || 0),
         });

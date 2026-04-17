@@ -4,20 +4,9 @@ import { AccountManager, type ModelFamily, type HeaderStyle, parseRateLimitReaso
 import type { AccountStorageV4 } from "./storage";
 import type { OAuthAuthDetails } from "./types";
 
-// Mock storage to prevent test data from leaking to real config files
-vi.mock("./storage", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./storage")>();
-  return {
-    ...original,
-    saveAccounts: vi.fn().mockResolvedValue(undefined),
-    saveAccountsReplace: vi.fn().mockResolvedValue(undefined),
-  };
-});
-
 describe("AccountManager", () => {
   beforeEach(() => {
     vi.useRealTimers();
-    vi.stubGlobal("process", { ...process, pid: 0 });
   });
 
   it("treats on-disk storage as source of truth, even when empty", () => {
@@ -1195,6 +1184,13 @@ describe("AccountManager", () => {
         expect(parseRateLimitReason(undefined, "Rate limit exceeded per minute")).toBe("RATE_LIMIT_EXCEEDED");
         expect(parseRateLimitReason(undefined, "Too many requests")).toBe("RATE_LIMIT_EXCEEDED");
         expect(parseRateLimitReason(undefined, "Quota exhausted for today")).toBe("QUOTA_EXHAUSTED");
+        expect(parseRateLimitReason(undefined, "Resource has been exhausted (e.g. check quota).")).toBe("QUOTA_EXHAUSTED");
+      });
+
+      it("prefers status-based capacity detection for 503/529 only", () => {
+        expect(parseRateLimitReason(undefined, "resource exhausted", 503)).toBe("MODEL_CAPACITY_EXHAUSTED");
+        expect(parseRateLimitReason(undefined, "resource exhausted", 529)).toBe("MODEL_CAPACITY_EXHAUSTED");
+        expect(parseRateLimitReason(undefined, "resource exhausted", 429)).toBe("UNKNOWN");
       });
 
       it("returns UNKNOWN when no pattern matches", () => {
@@ -1276,6 +1272,7 @@ describe("AccountManager", () => {
         );
         expect(backoff3).toBe(1_800_000);
         expect(account.consecutiveFailures).toBe(3);
+        expect(manager.getRateLimitReason(account, "gemini", "antigravity")).toBe("QUOTA_EXHAUSTED");
 
         vi.useRealTimers();
       });
@@ -1299,6 +1296,40 @@ describe("AccountManager", () => {
           account, "gemini", "antigravity", null, "QUOTA_EXHAUSTED", 180_000
         );
         expect(backoff).toBe(180_000);
+
+        vi.useRealTimers();
+      });
+
+      it("only allows all-accounts fallback when every eligible account is quota exhausted", () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(1000);
+
+        const stored: AccountStorageV4 = {
+          version: 4,
+          accounts: [
+            { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
+            { refreshToken: "r2", projectId: "p2", addedAt: 2, lastUsed: 0 },
+          ],
+          activeIndex: 0,
+        };
+
+        const manager = new AccountManager(undefined, stored);
+        const [first, second] = manager.getAccounts();
+        expect(first).toBeDefined();
+        expect(second).toBeDefined();
+
+        manager.markRateLimitedWithReason(first!, "gemini", "antigravity", "gemini-3-pro", "QUOTA_EXHAUSTED");
+        manager.markRateLimitedWithReason(second!, "gemini", "antigravity", "gemini-3-pro", "RATE_LIMIT_EXCEEDED");
+
+        expect(
+          manager.areAllAccountsRateLimitedForReason("gemini", "antigravity", "QUOTA_EXHAUSTED", "gemini-3-pro"),
+        ).toBe(false);
+
+        manager.markRateLimitedWithReason(second!, "gemini", "antigravity", "gemini-3-pro", "QUOTA_EXHAUSTED");
+
+        expect(
+          manager.areAllAccountsRateLimitedForReason("gemini", "antigravity", "QUOTA_EXHAUSTED", "gemini-3-pro"),
+        ).toBe(true);
 
         vi.useRealTimers();
       });

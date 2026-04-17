@@ -23,11 +23,57 @@ export type AuthDetails = OAuthAuthDetails | ApiKeyAuthDetails | NonOAuthAuthDet
 
 export type GetAuth = () => Promise<AuthDetails>;
 
-export interface ProviderModel {
-  cost?: {
+export interface ProviderModelCapabilities {
+  temperature?: boolean;
+  reasoning?: boolean;
+  attachment?: boolean;
+  toolcall?: boolean;
+  input?: Partial<Record<"text" | "audio" | "image" | "video" | "pdf", boolean>>;
+  output?: Partial<Record<"text" | "audio" | "image" | "video" | "pdf", boolean>>;
+  interleaved?: boolean | { field: "reasoning_content" | "reasoning_details" };
+}
+
+export interface ProviderModelCost {
+  input: number;
+  output: number;
+  cache?: {
+    read: number;
+    write: number;
+  };
+  experimentalOver200K?: {
     input: number;
     output: number;
+    cache?: {
+      read: number;
+      write: number;
+    };
   };
+}
+
+export interface ProviderModelLimit {
+  context: number;
+  input?: number;
+  output: number;
+}
+
+export interface ProviderModel {
+  id?: string;
+  providerID?: string;
+  name?: string;
+  family?: string;
+  api?: {
+    id?: string;
+    url?: string;
+    npm?: string;
+  };
+  capabilities?: ProviderModelCapabilities;
+  cost?: ProviderModelCost;
+  limit?: ProviderModelLimit;
+  status?: "alpha" | "beta" | "deprecated" | "active" | string;
+  headers?: Record<string, string>;
+  options?: Record<string, unknown>;
+  release_date?: string;
+  variants?: Record<string, Record<string, unknown>>;
   [key: string]: unknown;
 }
 

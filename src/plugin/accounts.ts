@@ -48,13 +48,9 @@ export function parseRateLimitReason(
   message: string | undefined, 
   status?: number
 ): RateLimitReason {
-  // 1. Status Code Checks (Rust parity)
-  // 529 = Site Overloaded, 503 = Service Unavailable -> Capacity issues
   if (status === 529 || status === 503) return "MODEL_CAPACITY_EXHAUSTED";
-  // 500 = Internal Server Error -> Treat as Server Error (soft wait)
   if (status === 500) return "SERVER_ERROR";
 
-  // 2. Explicit Reason String
   if (reason) {
     switch (reason.toUpperCase()) {
       case "QUOTA_EXHAUSTED": return "QUOTA_EXHAUSTED";
@@ -63,29 +59,34 @@ export function parseRateLimitReason(
     }
   }
   
-  // 3. Message Text Scanning (Rust Regex parity)
   if (message) {
     const lower = message.toLowerCase();
-    
-    // Capacity / Overloaded (Transient) - Check FIRST before "exhausted"
-    if (lower.includes("capacity") || lower.includes("overloaded") || lower.includes("resource exhausted")) {
-      return "MODEL_CAPACITY_EXHAUSTED";
-    }
 
-    // RPM / TPM (Short Wait)
-    // "per minute", "rate limit", "too many requests"
-    // "presque" (French: almost) - retained for i18n parity with Rust reference
-    if (lower.includes("per minute") || lower.includes("rate limit") || lower.includes("too many requests") || lower.includes("presque")) {
+    if (
+      lower.includes("too many requests") ||
+      lower.includes("per minute") ||
+      lower.includes("rate limit")
+    ) {
       return "RATE_LIMIT_EXCEEDED";
     }
 
-    // Quota (Long Wait)
-    if (lower.includes("exhausted") || lower.includes("quota")) {
+    if (
+      lower.includes("check quota") ||
+      lower.includes("quota exhausted") ||
+      lower.includes("per day") ||
+      (lower.includes("quota") && lower.includes("reset")) ||
+      (lower.includes("quota") && lower.includes("refill")) ||
+      (lower.includes("resource has been exhausted") && lower.includes("quota")) ||
+      (lower.includes("resource exhausted") && lower.includes("quota"))
+    ) {
       return "QUOTA_EXHAUSTED";
+    }
+
+    if (lower.includes("capacity") || lower.includes("overloaded")) {
+      return "MODEL_CAPACITY_EXHAUSTED";
     }
   }
   
-  // Default fallback for 429 without clearer info
   if (status === 429) {
     return "UNKNOWN"; 
   }
@@ -135,6 +136,7 @@ export interface ManagedAccount {
   expires?: number;
   enabled: boolean;
   rateLimitResetTimes: RateLimitStateV3;
+  rateLimitReasons?: Partial<Record<string, RateLimitReason>>;
   lastSwitchReason?: "rate-limit" | "initial" | "rotation";
   coolingDownUntil?: number;
   cooldownReason?: CooldownReason;
@@ -164,6 +166,21 @@ function clampNonNegativeInt(value: unknown, fallback: number): number {
     return fallback;
   }
   return value < 0 ? 0 : Math.floor(value);
+}
+
+function normalizeRateLimitReasons(
+  reasons?: Partial<Record<string, RateLimitReason>>,
+): Record<string, RateLimitReason> | undefined {
+  if (!reasons) {
+    return undefined;
+  }
+
+  const entries = Object.entries(reasons).filter((entry): entry is [string, RateLimitReason] => Boolean(entry[1]));
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  return Object.fromEntries(entries);
 }
 
 function getQuotaKey(family: ModelFamily, headerStyle: HeaderStyle, model?: string | null): QuotaKey {
@@ -220,8 +237,30 @@ function clearExpiredRateLimits(account: ManagedAccount): void {
     const resetTime = account.rateLimitResetTimes[key];
     if (resetTime !== undefined && now >= resetTime) {
       delete account.rateLimitResetTimes[key];
+      delete account.rateLimitReasons?.[key];
     }
   }
+}
+
+function getRateLimitReasonForHeaderStyle(
+  account: ManagedAccount,
+  family: ModelFamily,
+  headerStyle: HeaderStyle,
+  model?: string | null,
+): RateLimitReason | undefined {
+  if (family === "claude") {
+    return account.rateLimitReasons?.claude;
+  }
+
+  if (model) {
+    const modelKey = getQuotaKey(family, headerStyle, model);
+    const modelReason = account.rateLimitReasons?.[modelKey];
+    if (modelReason) {
+      return modelReason;
+    }
+  }
+
+  return account.rateLimitReasons?.[getQuotaKey(family, headerStyle)];
 }
 
 /**
@@ -356,6 +395,7 @@ export class AccountManager {
             expires: matchesFallback ? authFallback?.expires : undefined,
             enabled: acc.enabled !== false,
             rateLimitResetTimes: acc.rateLimitResetTimes ?? {},
+            rateLimitReasons: acc.rateLimitReasons ?? {},
             lastSwitchReason: acc.lastSwitchReason,
             coolingDownUntil: acc.coolingDownUntil,
             cooldownReason: acc.cooldownReason,
@@ -462,7 +502,12 @@ export class AccountManager {
   }
 
   getAccountsSnapshot(): ManagedAccount[] {
-    return this.accounts.map((a) => ({ ...a, parts: { ...a.parts }, rateLimitResetTimes: { ...a.rateLimitResetTimes } }));
+    return this.accounts.map((a) => ({
+      ...a,
+      parts: { ...a.parts },
+      rateLimitResetTimes: { ...a.rateLimitResetTimes },
+      rateLimitReasons: { ...a.rateLimitReasons },
+    }));
   }
 
   getCurrentAccountForFamily(family: ModelFamily): ManagedAccount | null {
@@ -617,6 +662,8 @@ export class AccountManager {
   ): void {
     const key = getQuotaKey(family, headerStyle, model);
     account.rateLimitResetTimes[key] = nowMs() + retryAfterMs;
+    account.rateLimitReasons = account.rateLimitReasons ?? {};
+    account.rateLimitReasons[key] = "UNKNOWN";
   }
 
   /**
@@ -654,6 +701,8 @@ export class AccountManager {
     const backoffMs = calculateBackoffMs(reason, failures - 1, retryAfterMs);
     const key = getQuotaKey(family, headerStyle, model);
     account.rateLimitResetTimes[key] = now + backoffMs;
+    account.rateLimitReasons = account.rateLimitReasons ?? {};
+    account.rateLimitReasons[key] = reason;
     
     return backoffMs;
   }
@@ -668,11 +717,14 @@ export class AccountManager {
     for (const account of this.accounts) {
       if (family === "claude") {
         delete account.rateLimitResetTimes.claude;
+        delete account.rateLimitReasons?.claude;
       } else {
         const antigravityKey = getQuotaKey(family, "antigravity", model);
         const cliKey = getQuotaKey(family, "gemini-cli", model);
         delete account.rateLimitResetTimes[antigravityKey];
         delete account.rateLimitResetTimes[cliKey];
+        delete account.rateLimitReasons?.[antigravityKey];
+        delete account.rateLimitReasons?.[cliKey];
       }
       account.consecutiveFailures = 0;
     }
@@ -753,6 +805,44 @@ export class AccountManager {
       return "gemini-cli";
     }
     return null;
+  }
+
+  getRateLimitReason(
+    account: ManagedAccount,
+    family: ModelFamily,
+    headerStyle: HeaderStyle,
+    model?: string | null,
+  ): RateLimitReason | undefined {
+    clearExpiredRateLimits(account);
+    return getRateLimitReasonForHeaderStyle(account, family, headerStyle, model);
+  }
+
+  areAllAccountsRateLimitedForReason(
+    family: ModelFamily,
+    headerStyle: HeaderStyle,
+    reason: RateLimitReason,
+    model?: string | null,
+  ): boolean {
+    let hasEligibleAccount = false;
+
+    for (const account of this.accounts) {
+      if (account.enabled === false || this.isAccountCoolingDown(account)) {
+        continue;
+      }
+
+      hasEligibleAccount = true;
+      clearExpiredRateLimits(account);
+
+      if (!isRateLimitedForHeaderStyle(account, family, headerStyle, model)) {
+        return false;
+      }
+
+      if (getRateLimitReasonForHeaderStyle(account, family, headerStyle, model) !== reason) {
+        return false;
+      }
+    }
+
+    return hasEligibleAccount;
   }
 
   /**
@@ -1005,6 +1095,7 @@ export class AccountManager {
       enabled: account.enabled,
       lastSwitchReason: account.lastSwitchReason,
       rateLimitResetTimes: Object.keys(account.rateLimitResetTimes).length > 0 ? account.rateLimitResetTimes : undefined,
+      rateLimitReasons: normalizeRateLimitReasons(account.rateLimitReasons),
       coolingDownUntil: account.coolingDownUntil,
       cooldownReason: account.cooldownReason,
       fingerprint: account.fingerprint,

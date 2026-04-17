@@ -8,19 +8,73 @@ import {
   saveAccountsReplace,
   type AccountMetadataV3,
   type AccountStorageV4,
+  type RateLimitStateV3,
 } from "./plugin/storage";
 import { checkAccountsQuota } from "./plugin/quota";
 import { getOpencodeConfigPath, updateOpencodeConfig } from "./plugin/config/updater";
 import { verifyAccountAccess } from "./plugin/verification";
+import {
+  clearStoredAccountVerificationRequired,
+  markStoredAccountVerificationRequired,
+} from "./plugin/cli-auth-helpers";
 import { DEFAULT_CONFIG } from "./plugin/config/schema";
+import type { PluginClient } from "./plugin/types";
 
 const TUI_PLUGIN_ID = "opencode-antigravity-auth:tui";
 const COMMAND_OPEN = "antigravity.accounts";
 const COMMAND_RELOAD = "antigravity.accounts.reload";
 
-type TuiApi = any;
+type ToastVariant = "info" | "warning" | "success" | "error";
 
-function accountStatus(now: number, account: any): string {
+type DialogSize = "large" | "xlarge";
+
+type TuiCommandRegistration = {
+  title: string;
+  value: string;
+  category?: string;
+  description?: string;
+  hidden?: boolean;
+  slash?: {
+    name: string;
+    aliases?: string[];
+  };
+  onSelect: () => void;
+};
+
+type TuiPromptProps = {
+  title: string;
+  value: string;
+  placeholder: string;
+  onCancel: () => void;
+  onConfirm: (value: string) => void;
+};
+
+interface TuiApi {
+  client: PluginClient;
+  ui: {
+    dialog: {
+      replace(factory: () => unknown): void;
+      setSize(size: DialogSize): void;
+      clear(): void;
+    };
+    DialogSelect(props: unknown): unknown;
+    DialogPrompt(props: TuiPromptProps): unknown;
+    toast(input: { variant: ToastVariant; message: string }): void;
+  };
+  command: {
+    register(factory: () => TuiCommandRegistration[]): void;
+    trigger(command: string): void;
+  };
+}
+
+type StoredAccount = {
+  email?: string;
+  enabled?: boolean;
+  verificationRequired?: boolean;
+  rateLimitResetTimes?: RateLimitStateV3;
+};
+
+function accountStatus(now: number, account: StoredAccount): string {
   if (account.enabled === false) return "disabled";
   if (account.verificationRequired) return "verification-required";
   const limits = account.rateLimitResetTimes;
@@ -32,7 +86,7 @@ function accountStatus(now: number, account: any): string {
   return "active";
 }
 
-function accountLabel(index: number, account: any, currentIndex: number, now: number): string {
+function accountLabel(index: number, account: StoredAccount, currentIndex: number, now: number): string {
   const email = typeof account.email === "string" && account.email.trim()
     ? account.email
     : `Account ${index + 1}`;
@@ -93,7 +147,7 @@ async function setCurrentIndex(index: number): Promise<{ ok: boolean; message: s
   return { ok: true, message: `Switched current account to #${index + 1}.` };
 }
 
-function createDialogSelect(api: TuiApi, props: any): any {
+function createDialogSelect(api: TuiApi, props: unknown): unknown {
   return api.ui.DialogSelect(props);
 }
 
@@ -683,58 +737,6 @@ function showTextDialog(api: TuiApi, title: string, lines: string[], onBack?: ()
   );
 }
 
-function markVerificationRequired(account: AccountMetadataV3, reason: string, verifyUrl?: string): boolean {
-  let changed = false;
-  if (account.verificationRequired !== true) {
-    account.verificationRequired = true;
-    changed = true;
-  }
-  if (account.verificationRequiredAt === undefined) {
-    account.verificationRequiredAt = Date.now();
-    changed = true;
-  }
-  const normalizedReason = reason.trim();
-  if (account.verificationRequiredReason !== normalizedReason) {
-    account.verificationRequiredReason = normalizedReason;
-    changed = true;
-  }
-  const normalizedUrl = verifyUrl?.trim();
-  if (normalizedUrl && account.verificationUrl !== normalizedUrl) {
-    account.verificationUrl = normalizedUrl;
-    changed = true;
-  }
-  if (account.enabled !== false) {
-    account.enabled = false;
-    changed = true;
-  }
-  return changed;
-}
-
-function clearVerificationRequired(account: AccountMetadataV3): boolean {
-  let changed = false;
-  if (account.verificationRequired !== false) {
-    account.verificationRequired = false;
-    changed = true;
-  }
-  if (account.verificationRequiredAt !== undefined) {
-    account.verificationRequiredAt = undefined;
-    changed = true;
-  }
-  if (account.verificationRequiredReason !== undefined) {
-    account.verificationRequiredReason = undefined;
-    changed = true;
-  }
-  if (account.verificationUrl !== undefined) {
-    account.verificationUrl = undefined;
-    changed = true;
-  }
-  if (account.enabled === false) {
-    account.enabled = true;
-    changed = true;
-  }
-  return changed;
-}
-
 async function runQuotaCheck(api: TuiApi): Promise<void> {
   const storage = await loadAccounts();
   if (!storage || storage.accounts.length === 0) {
@@ -833,13 +835,13 @@ async function runVerifyAll(api: TuiApi): Promise<void> {
 
     const verification = await verifyAccountAccess(account, api.client, ANTIGRAVITY_PROVIDER_ID);
     if (verification.status === "ok") {
-      if (clearVerificationRequired(account)) changed = true;
+      if (clearStoredAccountVerificationRequired(account, true).changed) changed = true;
       lines.push(`${label}: OK`);
       continue;
     }
 
     if (verification.status === "blocked") {
-      if (markVerificationRequired(account, verification.message, verification.verifyUrl)) changed = true;
+      if (markStoredAccountVerificationRequired(account, verification.message, verification.verifyUrl)) changed = true;
       lines.push(`${label}: NEEDS VERIFICATION - ${verification.message}`);
       if (verification.verifyUrl) {
         lines.push(`  URL: ${verification.verifyUrl}`);
@@ -868,7 +870,7 @@ async function runVerifyOne(api: TuiApi, index: number): Promise<void> {
   const verification = await verifyAccountAccess(account, api.client, ANTIGRAVITY_PROVIDER_ID);
 
   if (verification.status === "ok") {
-    const changed = clearVerificationRequired(account);
+    const changed = clearStoredAccountVerificationRequired(account, true).changed;
     if (changed) {
       await saveAccountsReplace(storage);
     }
@@ -877,7 +879,7 @@ async function runVerifyOne(api: TuiApi, index: number): Promise<void> {
   }
 
   if (verification.status === "blocked") {
-    const changed = markVerificationRequired(account, verification.message, verification.verifyUrl);
+    const changed = markStoredAccountVerificationRequired(account, verification.message, verification.verifyUrl);
     if (changed) {
       await saveAccountsReplace(storage);
     }
@@ -1047,6 +1049,9 @@ function buildOptions(storage: AccountStorageV4 | null): TuiDialogSelectOption<s
 
   for (let i = 0; i < storage.accounts.length; i++) {
     const account = storage.accounts[i];
+    if (!account) {
+      continue;
+    }
     list.push({
       title: accountLabel(i, account, storage.activeIndex, now),
       value: `account:${i}`,

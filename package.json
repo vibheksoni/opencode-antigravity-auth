@@ -9,6 +9,15 @@
             "import": "./dist/index.js",
             "types": "./dist/index.d.ts"
         },
+        "./server": {
+            "import": "./dist/index.js",
+            "types": "./dist/index.d.ts",
+            "config": {
+                "force_headless": true,
+                "cleanup_on_exit": true,
+                "debug": false
+            }
+        },
         "./tui": {
             "import": "./dist/tui.js",
             "types": "./dist/tui.d.ts"
@@ -67,7 +76,7 @@
         "zod-to-json-schema": "^3.25.1"
     },
     "dependencies": {
-        "@opencode-ai/plugin": "^1.4.0",
+        "@opencode-ai/plugin": "^1.14.19",
         "google-auth-library": "^10.3.0",
         "xdg-basedir": "^5.1.0",
         "zod": "^4.0.0"

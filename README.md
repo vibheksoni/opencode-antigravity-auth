@@ -41,6 +41,18 @@ C:\Users\<you>\AppData\Local\Programs\Antigravity\resources\app
 
 ## Quick Start
 
+### Stock OpenCode setup
+
+For the stock GitHub/OpenCode release, the safest mental model is:
+
+- `opencode.json` loads the server plugin
+- `tui.json` loads the TUI plugin
+- bridge-backed models only work if the root server plugin is loaded correctly
+
+If you only add the TUI side, `/ag-accounts` can appear while model requests still fail.
+
+If the package is installed through OpenCode's plugin installer, OpenCode can detect both the server and TUI targets from this package and patch the right config files automatically.
+
 ### 1. Clone and install
 
 ```powershell
@@ -93,6 +105,25 @@ Published plugin example:
 }
 ```
 
+Recommended manual config for stock OpenCode:
+
+`opencode.json`
+
+```json
+{
+  "plugin": [
+    [
+      "C:\\absolute\\path\\to\\opencode-antigravity-auth",
+      {
+        "force_headless": true,
+        "cleanup_on_exit": true,
+        "debug": false
+      }
+    ]
+  ]
+}
+```
+
 Default tuple plugin behavior when these values are omitted:
 
 - `force_headless: true`
@@ -103,14 +134,17 @@ Default tuple plugin behavior when these values are omitted:
 
 ### 3. Add the TUI plugin on newer OpenCode versions
 
-Newer OpenCode builds load the server plugin and the TUI plugin separately.
+Current OpenCode splits server plugins and TUI plugins.
+
+That means the slash commands and account UI do not come from the main server plugin entry.
+They come from the separate TUI entry.
 
 That means:
 
 - `opencode-antigravity-auth` handles the server/auth/runtime side
 - `opencode-antigravity-auth/tui` handles slash commands and the account manager UI
 
-If `bun run account -- list` works but `/ag-accounts` does not appear, the usual cause is that the TUI plugin was never added.
+If `bun run account -- list` works but `/ag-accounts` does not appear, the usual cause is that the TUI plugin was never added to `tui.json`, or the TUI config points at the package root instead of the explicit `/tui` entry.
 
 Use the active `tui.json`.
 
@@ -130,7 +164,29 @@ Installed plugin example:
 }
 ```
 
-Local path example:
+Recommended manual config for stock OpenCode:
+
+`tui.json`
+
+```json
+{
+  "plugin": [
+    "C:\\absolute\\path\\to\\opencode-antigravity-auth/tui"
+  ]
+}
+```
+
+Local path example for current OpenCode:
+
+```json
+{
+  "plugin": [
+    "C:\\absolute\\path\\to\\opencode-antigravity-auth/tui"
+  ]
+}
+```
+
+If your environment prefers backslashes in the path portion, this also works:
 
 ```json
 {
@@ -140,15 +196,13 @@ Local path example:
 }
 ```
 
-If your local setup expects the path-style spec exactly as a filesystem string, this form also works:
+Important:
 
-```json
-{
-  "plugin": [
-    "C:\\absolute\\path\\to\\opencode-antigravity-auth/tui"
-  ]
-}
-```
+- put the server plugin in `opencode.json`
+- put the TUI plugin in `tui.json`
+- for the TUI side, prefer the explicit `/tui` entry instead of the package root
+- do not point `opencode.json` at `/tui`
+- do not point `tui.json` at the package root unless your local setup explicitly requires it
 
 After adding the TUI entry, restart OpenCode and then use:
 
@@ -223,6 +277,34 @@ Without the TUI plugin entry:
 - the standalone helper can still work
 - auth/runtime behavior may still exist
 - but `/ag-accounts` and other TUI-side commands will not load
+
+What this looks like in practice:
+
+- `opencode.json` loads the auth/provider/bridge logic
+- `tui.json` loads the slash commands, dialogs, and account manager
+
+If you only configure the root package and skip the `/tui` entry, the plugin can look partially installed while the UI commands still never appear.
+
+## Bridge Model Notes
+
+Bridge-backed models such as:
+
+- `antigravity-server-bridge/antigravity-bridge-claude-sonnet-4.6-thinking`
+- `antigravity-server-bridge/antigravity-bridge-gemini-3-flash`
+
+depend on the root server plugin being loaded successfully.
+
+If the root server plugin is missing or misconfigured, you can end up with a visible bridge provider but no runtime bridge URL, which leads to OpenCode errors like:
+
+```text
+"undefined/chat/completions" cannot be parsed as a URL.
+```
+
+If you see that:
+
+- verify the root plugin is present in `opencode.json`
+- verify the TUI entry is separate in `tui.json`
+- fully restart OpenCode after changing plugin config
 
 ## Recommended Windows Setup
 

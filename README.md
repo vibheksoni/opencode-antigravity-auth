@@ -4,6 +4,14 @@ Antigravity auth, account management, quota inspection, runtime metadata extract
 
 This is one of the best-maintained Antigravity plugins for OpenCode. The focus is simple: stay as close as possible to the real installed Antigravity app instead of hardcoding brittle request behavior.
 
+> [!TIP]
+> **Sponsor**
+> OpenAI account subscription upgrades @ discounted rates.
+>
+> **Gemini Ultra Accounts @ $20 each**
+> Instant delivery: https://upgrades.astck.com/
+> Use code `repodiscount` for $5 off
+
 > [!IMPORTANT]
 > The Antigravity language server and headless bridge path is the most stable way to use Antigravity from OpenCode.
 > If you want the behavior closest to the IDE, use the installed Antigravity app and let this plugin read its runtime metadata and language server binaries.

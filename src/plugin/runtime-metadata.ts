@@ -9,6 +9,8 @@ import {
   setAntigravityOAuthClients,
   setAntigravityVersion,
 } from "../constants";
+import { getAntigravityBridgeAppDir } from "../bridge/options";
+import { getConfiguredAntigravityAppDir } from "./config";
 import { createLogger } from "./logger";
 import { initAntigravityVersion } from "./version";
 
@@ -51,11 +53,14 @@ function candidateRoots(): string[] {
     roots.add(envRoot);
   }
 
-  roots.add(path.join(process.cwd(), ".ignore", "antigravity-app"));
+  const configuredRoot = getConfiguredAntigravityAppDir();
+  if (configuredRoot) {
+    roots.add(configuredRoot);
+  }
 
-  const configDir = process.env.OPENCODE_CONFIG_DIR?.trim();
-  if (configDir) {
-    roots.add(path.join(path.dirname(configDir), ".ignore", "antigravity-app"));
+  const bridgeRoot = getAntigravityBridgeAppDir();
+  if (bridgeRoot) {
+    roots.add(bridgeRoot);
   }
 
   const localPrograms = process.env.LOCALAPPDATA
@@ -148,6 +153,10 @@ function discoverLocalMetadata(): LocalAppMetadata | null {
   }
 
   return best;
+}
+
+export function findLocalAntigravityAppRoot(): string | null {
+  return discoverLocalMetadata()?.root ?? null;
 }
 
 /**

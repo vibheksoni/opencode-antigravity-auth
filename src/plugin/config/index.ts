@@ -26,6 +26,8 @@ export {
   getProjectConfigPath,
   getDefaultLogsDir,
   configExists,
+  mergeRuntimeOptions,
   initRuntimeConfig,
+  getConfiguredAntigravityAppDir,
   getKeepThinking,
 } from "./loader";

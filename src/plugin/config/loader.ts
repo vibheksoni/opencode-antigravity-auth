@@ -140,6 +140,29 @@ export function loadConfig(directory: string): AntigravityConfig {
 }
 
 /**
+ * Merge tuple plugin options from opencode.json into the resolved runtime config.
+ * Unknown keys are ignored so bridge-only options can coexist in the same block.
+ */
+export function mergeRuntimeOptions(
+  base: AntigravityConfig,
+  options: Record<string, unknown> | undefined,
+): AntigravityConfig {
+  if (!options) {
+    return base;
+  }
+
+  const result = AntigravityConfigSchema.partial().safeParse(options);
+  if (!result.success) {
+    log.warn("Tuple plugin options failed validation", {
+      issues: result.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join(", "),
+    });
+    return base;
+  }
+
+  return mergeConfigs(base, result.data);
+}
+
+/**
  * Check if a config file exists at the given path.
  */
 export function configExists(path: string): boolean {
@@ -161,4 +184,8 @@ export function initRuntimeConfig(config: AntigravityConfig): void {
 
 export function getKeepThinking(): boolean {
   return runtimeConfig?.keep_thinking ?? false;
+}
+
+export function getConfiguredAntigravityAppDir(): string | undefined {
+  return runtimeConfig?.app_dir?.trim() || undefined;
 }

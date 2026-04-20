@@ -39,7 +39,7 @@ import { checkAccountsQuota } from "./plugin/quota";
 import { clearAccounts, loadAccounts } from "./plugin/storage";
 import { AccountManager, type ManagedAccount, type ModelFamily, type RateLimitReason, parseRateLimitReason, calculateBackoffMs, computeSoftQuotaCacheTtlMs } from "./plugin/accounts";
 import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
-import { loadConfig, initRuntimeConfig, type AntigravityConfig } from "./plugin/config";
+import { loadConfig, mergeRuntimeOptions, initRuntimeConfig, type AntigravityConfig } from "./plugin/config";
 import { createSessionRecoveryHook, getRecoverySuccessToast } from "./plugin/recovery";
 import { initDiskSignatureCache } from "./plugin/cache";
 import { createProactiveRefreshQueue, type ProactiveRefreshQueue } from "./plugin/refresh-queue";
@@ -596,9 +596,10 @@ function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
  */
 export const createAntigravityPlugin = (providerId: string) => async (
   { client, directory }: PluginContext,
+  options?: Record<string, unknown>,
 ): Promise<PluginResult> => {
   // Load configuration from files and environment variables
-  const config = loadConfig(directory);
+  const config = mergeRuntimeOptions(loadConfig(directory), options);
   initRuntimeConfig(config);
 
   // Cached getAuth function for tool access

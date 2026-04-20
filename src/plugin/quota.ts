@@ -3,18 +3,22 @@ import {
   ANTIGRAVITY_PROVIDER_ID,
 } from "../constants";
 import { accessTokenExpired, formatRefreshParts, parseRefreshParts } from "./auth";
+import { resolveCachedAuth } from "./cache";
 import { logQuotaFetch, logQuotaStatus } from "./debug";
 import {
   fetchAvailableModelsCatalog,
   type CatalogModelEntry,
 } from "./model-catalog";
+import { createLogger } from "./logger";
 import { ensureProjectContext } from "./project";
+import { initAntigravityRuntimeMetadata } from "./runtime-metadata";
 import { refreshAccessToken } from "./token";
 import { getModelFamily } from "./transform/model-resolver";
 import type { PluginClient, OAuthAuthDetails } from "./types";
 import type { AccountMetadataV3 } from "./storage";
 
 const FETCH_TIMEOUT_MS = 10000;
+const log = createLogger("quota");
 
 export type QuotaGroup = "claude" | "gemini-pro" | "gemini-flash";
 
@@ -267,6 +271,24 @@ function applyAccountUpdates(account: AccountMetadataV3, auth: OAuthAuthDetails)
   return changed ? updated : undefined;
 }
 
+function quotaSummaryFromCachedQuota(account: AccountMetadataV3): QuotaSummary | undefined {
+  const groups = account.cachedQuota;
+  if (!groups || Object.keys(groups).length === 0) {
+    return undefined;
+  }
+
+  let modelCount = 0;
+  for (const group of Object.values(groups)) {
+    modelCount += group?.modelCount ?? 0;
+  }
+
+  return {
+    groups,
+    modelCount,
+    error: "Showing cached quota data.",
+  };
+}
+
 export async function checkAccountsQuota(
   accounts: AccountMetadataV3[],
   client: PluginClient,
@@ -275,17 +297,53 @@ export async function checkAccountsQuota(
   const results: AccountQuotaResult[] = [];
   
   logQuotaFetch("start", accounts.length);
+  await initAntigravityRuntimeMetadata();
 
   for (const [index, account] of accounts.entries()) {
     const disabled = account.enabled === false;
+    const cachedQuota = quotaSummaryFromCachedQuota(account);
+    log.debug("quota-check-account", {
+      index,
+      email: account.email,
+      disabled,
+      hasCachedQuota: !!cachedQuota,
+      hasProjectId: !!account.projectId,
+      hasManagedProjectId: !!account.managedProjectId,
+      verificationRequired: !!account.verificationRequired,
+      refreshTokenLength: account.refreshToken.length,
+    });
+    if (disabled) {
+      results.push({
+        index,
+        email: account.email,
+        status: "disabled",
+        disabled: true,
+        quota: cachedQuota,
+      });
+      continue;
+    }
 
-    let auth = buildAuthFromAccount(account);
+    let auth = resolveCachedAuth(buildAuthFromAccount(account));
 
     try {
+      log.debug("quota-auth-state", {
+        index,
+        email: account.email,
+        hasAccess: !!auth.access,
+        expires: auth.expires,
+        accessExpired: accessTokenExpired(auth),
+      });
       if (accessTokenExpired(auth)) {
         const refreshed = await refreshAccessToken(auth, client, providerId);
         if (!refreshed) {
-          throw new Error("Token refresh failed");
+          log.error("quota-refresh-returned-empty", {
+            index,
+            email: account.email,
+            hasCachedQuota: !!cachedQuota,
+            hasProjectId: !!account.projectId,
+            hasManagedProjectId: !!account.managedProjectId,
+          });
+          throw new Error("Access token refresh did not return a usable token. Check antigravity token logs for the exact failure.");
         }
         auth = refreshed;
       }
@@ -293,6 +351,13 @@ export async function checkAccountsQuota(
       const projectContext = await ensureProjectContext(auth);
       auth = projectContext.auth;
       const updatedAccount = applyAccountUpdates(account, auth);
+      log.debug("quota-project-context", {
+        index,
+        email: account.email,
+        effectiveProjectId: projectContext.effectiveProjectId,
+        usesGcpTos: projectContext.routeState?.usesGcpTos,
+        rotatedAuth: !!updatedAccount,
+      });
 
       let quotaResult: QuotaSummary;
       let geminiCliQuotaResult: GeminiCliQuotaSummary;
@@ -347,7 +412,14 @@ export async function checkAccountsQuota(
         email: account.email,
         status: "error",
         disabled,
+        quota: cachedQuota,
         error: error instanceof Error ? error.message : String(error),
+      });
+      log.error("quota-check-error", {
+        index,
+        email: account.email,
+        error: error instanceof Error ? error.stack ?? error.message : String(error),
+        hasCachedQuota: !!cachedQuota,
       });
       logQuotaFetch("error", undefined, `account=${account.email ?? index} error=${error instanceof Error ? error.message : String(error)}`);
     }

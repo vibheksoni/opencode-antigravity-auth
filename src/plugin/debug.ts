@@ -36,9 +36,8 @@ let debugState: DebugState | null = null;
  * Get the OS-specific config directory.
  */
 function getConfigDir(): string {
-  const platform = process.platform;
-  if (platform === "win32") {
-    return join(env.APPDATA || join(homedir(), "AppData", "Roaming"), "opencode");
+  if (env.OPENCODE_CONFIG_DIR?.trim()) {
+    return env.OPENCODE_CONFIG_DIR.trim();
   }
   const xdgConfig = env.XDG_CONFIG_HOME || join(homedir(), ".config");
   return join(xdgConfig, "opencode");
@@ -192,6 +191,14 @@ export function isDebugTuiEnabled(): boolean {
 
 export function getLogFilePath(): string | undefined {
   return getDebugState().logFilePath;
+}
+
+export function writeDebugLine(line: string): void {
+  const state = getDebugState();
+  if (!state.debugEnabled) {
+    return;
+  }
+  state.logWriter(line);
 }
 
 export interface AntigravityDebugContext {

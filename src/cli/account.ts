@@ -3,9 +3,13 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
 import { authorizeAntigravity, exchangeAntigravity } from "../antigravity/oauth";
-import { clearAccounts, loadAccounts } from "../plugin/storage";
+import { parseRefreshParts } from "../plugin/auth";
+import { clearAccounts, loadAccounts, saveAccounts } from "../plugin/storage";
 import { persistAccountPool } from "../plugin/account-persistence";
+import { markStoredAccountVerificationRequired } from "../plugin/cli-auth-helpers";
+import { initAntigravityRuntimeMetadata } from "../plugin/runtime-metadata";
 import { startOAuthListener } from "../plugin/server";
+import { verifyAccountAccess } from "../plugin/verification";
 import { clearGoogleOAuthAuthIfOauth, getAuthStorePath, writeGoogleOAuthAuth } from "./auth-store";
 
 type Command = "add" | "list" | "clear" | "help";
@@ -186,7 +190,9 @@ async function clearAccountState(): Promise<void> {
  * @param noBrowser boolean - Skip automatic browser launch.
  * @returns Promise<void> - Resolves after the account is saved.
  */
-async function addAccount(noBrowser: boolean, isGcpTos: boolean): Promise<void> {
+export async function addAccount(noBrowser: boolean, isGcpTos: boolean): Promise<void> {
+  await initAntigravityRuntimeMetadata();
+
   let callbackInput = "";
   let listener = null;
 
@@ -246,6 +252,35 @@ async function addAccount(noBrowser: boolean, isGcpTos: boolean): Promise<void> 
   console.log(`Added Antigravity account${result.email ? ` (${result.email})` : ""}.`);
   console.log(`Saved ${accountCount} account(s) in ${storage ? "the account pool" : "storage"}.`);
   console.log(`Updated OpenCode auth at ${authPath}.`);
+
+  const addedRefreshToken = parseRefreshParts(result.refresh).refreshToken;
+  const addedAccount = storage?.accounts.find(
+    (account) => account.refreshToken === addedRefreshToken || account.refreshToken === result.refresh,
+  );
+  if (addedAccount) {
+    const verification = await verifyAccountAccess(addedAccount, undefined as never, "google");
+    if (verification.status === "blocked") {
+      const changed = markStoredAccountVerificationRequired(
+        addedAccount,
+        verification.message,
+        verification.verifyUrl,
+      );
+      if (changed && storage) {
+        await saveAccounts(storage);
+      }
+      console.log("");
+      console.log(`Google requires extra verification for ${result.email ?? "this account"}.`);
+      console.log(verification.message);
+      if (verification.verifyUrl) {
+        console.log("");
+        console.log("Verification URL:");
+        console.log(verification.verifyUrl);
+      }
+      console.log("");
+      console.log("This account was saved but disabled until verification is completed.");
+      return;
+    }
+  }
 }
 
 /**
@@ -274,8 +309,19 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   }
 }
 
-void main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`Error: ${message}`);
-  process.exitCode = 1;
-});
+function isDirectRun(): boolean {
+  const entry = process.argv[1];
+  if (!entry) {
+    return false;
+  }
+  const normalized = entry.replace(/\\/g, "/").toLowerCase();
+  return normalized.endsWith("/src/cli/account.ts") || normalized.endsWith("/dist/src/cli/account.js");
+}
+
+if (isDirectRun()) {
+  void main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Error: ${message}`);
+    process.exitCode = 1;
+  });
+}

@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { ANTIGRAVITY_PROVIDER_ID } from "./constants";
 import {
   clearAccounts,
+  getStoragePath,
   loadAccounts,
   saveAccounts,
   saveAccountsReplace,
@@ -11,7 +12,14 @@ import {
   type RateLimitStateV3,
 } from "./plugin/storage";
 import { checkAccountsQuota } from "./plugin/quota";
+import {
+  initRuntimeConfig,
+  loadConfig,
+  mergeRuntimeOptions,
+} from "./plugin/config";
 import { getOpencodeConfigPath, updateOpencodeConfig } from "./plugin/config/updater";
+import { initializeDebug } from "./plugin/debug";
+import { createLogger } from "./plugin/logger";
 import { verifyAccountAccess } from "./plugin/verification";
 import {
   clearStoredAccountVerificationRequired,
@@ -23,6 +31,7 @@ import type { PluginClient } from "./plugin/types";
 const TUI_PLUGIN_ID = "opencode-antigravity-auth:tui";
 const COMMAND_OPEN = "antigravity.accounts";
 const COMMAND_RELOAD = "antigravity.accounts.reload";
+const log = createLogger("tui");
 
 type ToastVariant = "info" | "warning" | "success" | "error";
 
@@ -51,6 +60,14 @@ type TuiPromptProps = {
 
 interface TuiApi {
   client: PluginClient;
+  state: {
+    config?: {
+      plugin?: Array<string | [string, Record<string, unknown>]>;
+    };
+    path: {
+      directory: string;
+    };
+  };
   ui: {
     dialog: {
       replace(factory: () => unknown): void;
@@ -71,6 +88,14 @@ type StoredAccount = {
   email?: string;
   enabled?: boolean;
   verificationRequired?: boolean;
+  verificationRequiredReason?: string;
+  verificationUrl?: string;
+  projectId?: string;
+  managedProjectId?: string;
+  isGcpTos?: boolean;
+  coolingDownUntil?: number;
+  cachedQuota?: AccountMetadataV3["cachedQuota"];
+  cachedQuotaUpdatedAt?: number;
   rateLimitResetTimes?: RateLimitStateV3;
 };
 
@@ -86,15 +111,154 @@ function accountStatus(now: number, account: StoredAccount): string {
   return "active";
 }
 
-function accountLabel(index: number, account: StoredAccount, currentIndex: number, now: number): string {
+function accountTitle(index: number, account: StoredAccount): string {
   const email = typeof account.email === "string" && account.email.trim()
     ? account.email
     : `Account ${index + 1}`;
-  const status = accountStatus(now, account);
+  return `${index + 1}. ${email}`;
+}
+
+function formatQuotaPercent(value?: number): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "n/a";
+  }
+  const clamped = Math.max(0, Math.min(1, value));
+  return `${Math.round(clamped * 100)}%`;
+}
+
+function formatRelativeTime(timestamp?: number): string {
+  if (typeof timestamp !== "number" || !Number.isFinite(timestamp)) {
+    return "unknown";
+  }
+  const deltaMs = Math.max(0, Date.now() - timestamp);
+  const totalSeconds = Math.floor(deltaMs / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s ago`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m ago`;
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) return `${totalHours}h ago`;
+  return `${Math.floor(totalHours / 24)}d ago`;
+}
+
+function shortenId(value?: string): string {
+  if (!value) return "not set";
+  if (value.length <= 16) return value;
+  return `${value.slice(0, 6)}...${value.slice(-6)}`;
+}
+
+function nextRateLimitReset(account: StoredAccount, now: number): number | undefined {
+  const limits = account.rateLimitResetTimes;
+  if (!limits || typeof limits !== "object") {
+    return undefined;
+  }
+  const futureValues = Object.values(limits)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > now)
+    .sort((left, right) => left - right);
+  return futureValues[0];
+}
+
+function accountSummary(index: number, account: StoredAccount, currentIndex: number, now: number): string {
   const tags: string[] = [];
   if (index === currentIndex) tags.push("current");
-  tags.push(status);
-  return `${index + 1}. ${email} [${tags.join("] [")}]`;
+  tags.push(accountStatus(now, account));
+  if (typeof account.cachedQuotaUpdatedAt === "number") {
+    tags.push(`quota ${formatRelativeTime(account.cachedQuotaUpdatedAt)}`);
+  }
+  const nextReset = nextRateLimitReset(account, now);
+  if (typeof nextReset === "number") {
+    tags.push(`ready ${formatWaitTime(nextReset - now)}`);
+  }
+  return tags.join(" | ");
+}
+
+function cachedQuotaOptions(account: AccountMetadataV3): TuiDialogSelectOption<string>[] {
+  const groups = account.cachedQuota ?? {};
+  const options: TuiDialogSelectOption<string>[] = [];
+  const orderedGroups: Array<[string, string]> = [
+    ["claude", "Claude"],
+    ["gemini-pro", "Gemini Pro"],
+    ["gemini-flash", "Gemini Flash"],
+  ];
+
+  if (typeof account.cachedQuotaUpdatedAt === "number") {
+    options.push({
+      title: `Updated ${formatRelativeTime(account.cachedQuotaUpdatedAt)}`,
+      value: "info:quota-updated",
+      category: "Cached quota",
+    });
+  }
+
+  for (const [key, label] of orderedGroups) {
+    const group = groups?.[key];
+    if (!group) continue;
+    options.push({
+      title: `${label}: ${formatQuotaPercent(group.remainingFraction)}${formatReset(group.resetTime)}`,
+      value: `info:quota:${key}`,
+      category: "Cached quota",
+      description: group.modelCount > 0 ? `${group.modelCount} model(s) in this bucket` : undefined,
+    });
+  }
+
+  if (options.length === 0) {
+    options.push({
+      title: "No cached quota data",
+      value: "info:no-quota",
+      category: "Cached quota",
+      description: "Run Refresh quota to load usage and reset windows.",
+    });
+  }
+
+  return options;
+}
+
+function accountInfoOptions(index: number, account: AccountMetadataV3, currentIndex: number, now: number): TuiDialogSelectOption<string>[] {
+  const options: TuiDialogSelectOption<string>[] = [
+    {
+      title: index === currentIndex ? "Current account" : "Standby account",
+      value: "info:current",
+      category: "Overview",
+      description: accountStatus(now, account),
+    },
+    {
+      title: `Enabled: ${account.enabled === false ? "No" : "Yes"}`,
+      value: "info:enabled",
+      category: "Overview",
+    },
+    {
+      title: `Managed project: ${shortenId(account.managedProjectId)}`,
+      value: "info:managed-project",
+      category: "Overview",
+    },
+    {
+      title: `Project: ${shortenId(account.projectId)}`,
+      value: "info:project",
+      category: "Overview",
+    },
+    {
+      title: `GCP ToS: ${account.isGcpTos ? "Yes" : "No"}`,
+      value: "info:gcp-tos",
+      category: "Overview",
+    },
+  ];
+
+  if (account.verificationRequired) {
+    options.push({
+      title: "Verification required",
+      value: "info:verification",
+      category: "Overview",
+      description: account.verificationRequiredReason ?? account.verificationUrl ?? "Run Verify account for current status.",
+    });
+  }
+
+  if (typeof account.coolingDownUntil === "number" && account.coolingDownUntil > now) {
+    options.push({
+      title: `Cooling down: ${formatWaitTime(account.coolingDownUntil - now)}`,
+      value: "info:cooldown",
+      category: "Overview",
+    });
+  }
+
+  return options;
 }
 
 async function removeAccountByIndex(index: number): Promise<{ ok: boolean; message: string }> {
@@ -149,6 +313,29 @@ async function setCurrentIndex(index: number): Promise<{ ok: boolean; message: s
 
 function createDialogSelect(api: TuiApi, props: unknown): unknown {
   return api.ui.DialogSelect(props);
+}
+
+function resolvePluginOptionsFromState(api: TuiApi): Record<string, unknown> | undefined {
+  const pluginList = api.state.config?.plugin;
+  if (!Array.isArray(pluginList)) {
+    return undefined;
+  }
+
+  for (const entry of pluginList) {
+    if (!Array.isArray(entry)) {
+      continue;
+    }
+    const [spec, options] = entry;
+    if (typeof spec !== "string" || !spec.includes("opencode-antigravity-auth")) {
+      continue;
+    }
+    if (!options || typeof options !== "object" || Array.isArray(options)) {
+      continue;
+    }
+    return options as Record<string, unknown>;
+  }
+
+  return undefined;
 }
 
 function formatWaitTime(ms: number): string {
@@ -711,11 +898,17 @@ function showLoadBalancerSettingsDialog(api: TuiApi): void {
 
 function showTextDialog(api: TuiApi, title: string, lines: string[], onBack?: () => void): void {
   const options: TuiDialogSelectOption<string>[] = [
-    ...lines.map((line, i) => ({
-      title: line,
-      value: `line:${i}`,
-      category: "Info",
-    })),
+    ...lines.map((line, i) => {
+      const trimmed = line.trim();
+      const separator = trimmed.indexOf(":");
+      const hasDescription = separator > 0 && separator < trimmed.length - 1;
+      return {
+        title: hasDescription ? trimmed.slice(0, separator) : trimmed,
+        value: `line:${i}`,
+        category: trimmed.startsWith("-") || trimmed.startsWith("*") ? "Details" : "Info",
+        description: hasDescription ? trimmed.slice(separator + 1).trim() : undefined,
+      };
+    }),
     {
       title: "Back",
       value: "back",
@@ -737,34 +930,104 @@ function showTextDialog(api: TuiApi, title: string, lines: string[], onBack?: ()
   );
 }
 
-async function runQuotaCheck(api: TuiApi): Promise<void> {
+async function runQuotaCheck(api: TuiApi, accountIndex?: number, onBack?: () => void): Promise<void> {
   const storage = await loadAccounts();
+  log.debug("tui-quota-open", {
+    storagePath: getStoragePath(),
+    totalAccounts: storage?.accounts.length ?? 0,
+    requestedAccountIndex: accountIndex,
+  });
   if (!storage || storage.accounts.length === 0) {
     api.ui.toast({ variant: "error", message: "No accounts found." });
     return;
   }
 
-  api.ui.toast({ variant: "info", message: `Checking quotas for ${storage.accounts.length} account(s)...` });
-  const results = await checkAccountsQuota(storage.accounts, api.client, ANTIGRAVITY_PROVIDER_ID);
+  const selectedAccounts = typeof accountIndex === "number"
+    ? storage.accounts
+        .map((account, index) => ({ account, index }))
+        .filter((entry) => entry.index === accountIndex)
+    : storage.accounts.map((account, index) => ({ account, index }));
+
+  if (selectedAccounts.length === 0) {
+    api.ui.toast({ variant: "error", message: "Account not found." });
+    return;
+  }
+
+  const accountsToCheck = selectedAccounts.map((entry) => entry.account);
+  log.debug("tui-quota-selected", {
+    storagePath: getStoragePath(),
+    selectedAccounts: selectedAccounts.map((entry) => ({
+      index: entry.index,
+      email: entry.account.email,
+      enabled: entry.account.enabled !== false,
+      hasProjectId: !!entry.account.projectId,
+      hasManagedProjectId: !!entry.account.managedProjectId,
+      verificationRequired: !!entry.account.verificationRequired,
+      refreshTokenLength: entry.account.refreshToken.length,
+    })),
+  });
+  api.ui.toast({
+    variant: "info",
+    message: accountsToCheck.length === 1
+      ? `Checking quota for ${accountsToCheck[0]?.email ?? `Account ${(selectedAccounts[0]?.index ?? 0) + 1}`}...`
+      : `Checking quotas for ${accountsToCheck.length} account(s)...`,
+  });
+  const results = await checkAccountsQuota(accountsToCheck, api.client, ANTIGRAVITY_PROVIDER_ID);
+  log.debug("tui-quota-results", {
+    storagePath: getStoragePath(),
+    results: results.map((result, index) => ({
+      requestedIndex: selectedAccounts[index]?.index,
+      email: result?.email,
+      status: result?.status,
+      error: result?.error,
+      quotaGroups: result?.quota ? Object.keys(result.quota.groups) : [],
+      geminiCliModels: result?.geminiCliQuota?.models?.length ?? 0,
+    })),
+  });
 
   let storageUpdated = false;
   const lines: string[] = [];
-  for (const result of results) {
-    const label = result.email || `Account ${result.index + 1}`;
+  for (let i = 0; i < results.length; i += 1) {
+    const result = results[i];
+    if (!result) {
+      continue;
+    }
+    const selected = selectedAccounts[i];
+    const actualIndex = selected?.index ?? result.index;
+    const storedAccount = storage.accounts[actualIndex];
+    const label = result.email || `Account ${actualIndex + 1}`;
+    if (result.status === "disabled") {
+      lines.push(`${label}: disabled (skipped)`);
+      const cachedGroups = storedAccount?.cachedQuota;
+      if (cachedGroups && Object.keys(cachedGroups).length > 0) {
+        lines.push(`Cached quota: ${storedAccount?.cachedQuotaUpdatedAt ? formatRelativeTime(storedAccount.cachedQuotaUpdatedAt) : "available"}`);
+        for (const [key, value] of Object.entries(cachedGroups)) {
+          lines.push(`${key}: ${formatQuotaPercent(value.remainingFraction)}${formatReset(value.resetTime)}`);
+        }
+      }
+      continue;
+    }
     if (result.status === "error") {
       lines.push(`${label}: ERROR - ${result.error ?? "quota fetch failed"}`);
+      const cachedGroups = storedAccount?.cachedQuota;
+      if (cachedGroups && Object.keys(cachedGroups).length > 0) {
+        lines.push(`Cached quota: ${storedAccount?.cachedQuotaUpdatedAt ? formatRelativeTime(storedAccount.cachedQuotaUpdatedAt) : "available"}`);
+        for (const [key, value] of Object.entries(cachedGroups)) {
+          lines.push(`${key}: ${formatQuotaPercent(value.remainingFraction)}${formatReset(value.resetTime)}`);
+        }
+      }
       continue;
     }
 
     if (result.updatedAccount) {
-      storage.accounts[result.index] = {
+      storage.accounts[actualIndex] = {
         ...result.updatedAccount,
         cachedQuota: result.quota?.groups,
         cachedQuotaUpdatedAt: Date.now(),
       };
       storageUpdated = true;
     } else {
-      const acc = storage.accounts[result.index];
+      const acc = storage.accounts[actualIndex];
       if (acc && result.quota?.groups) {
         acc.cachedQuota = result.quota.groups;
         acc.cachedQuotaUpdatedAt = Date.now();
@@ -790,6 +1053,8 @@ async function runQuotaCheck(api: TuiApi): Promise<void> {
           `  Gemini CLI ${model.modelId}: ${Math.round(model.remainingFraction * 100)}%${formatReset(model.resetTime)}`,
         );
       }
+    } else if (result.geminiCliQuota?.error) {
+      lines.push(`  Gemini CLI: ${result.geminiCliQuota.error}`);
     }
   }
 
@@ -797,7 +1062,12 @@ async function runQuotaCheck(api: TuiApi): Promise<void> {
     await saveAccounts(storage);
   }
 
-  showTextDialog(api, "Quota Results", lines, () => showAccountsDialog(api));
+  showTextDialog(
+    api,
+    accountsToCheck.length === 1 ? "Quota Result" : "Quota Results",
+    lines,
+    onBack ?? (() => showAccountsDialog(api)),
+  );
 }
 
 async function runConfigureModels(api: TuiApi): Promise<void> {
@@ -904,89 +1174,123 @@ function openProviderConnect(api: TuiApi, message?: string): void {
 }
 
 function showAccountActions(api: TuiApi, index: number): void {
-  const options: TuiDialogSelectOption<string>[] = [
-    {
-      title: "Set as current",
-      value: `set-current:${index}`,
-      category: "Account",
-      description: "Use this account as the active account",
-    },
-    {
-      title: "Verify this account",
-      value: `verify:${index}`,
-      category: "Account",
-      description: "Run verification for this specific account",
-    },
-    {
-      title: "Delete this account",
-      value: `delete:${index}`,
-      category: "Danger Zone",
-      description: "Remove this account from local storage",
-    },
-    {
-      title: "Back",
-      value: "back",
-      category: "Navigation",
-    },
-  ];
+  loadAccounts()
+    .then((storage) => {
+      const account = storage?.accounts[index];
+      if (!storage || !account) {
+        api.ui.toast({ variant: "error", message: "Account not found." });
+        showAccountsDialog(api);
+        return;
+      }
 
-  api.ui.dialog.replace(() =>
-    createDialogSelect(api, {
-      title: `Account ${index + 1}`,
-      options,
-      onSelect: (item: TuiDialogSelectOption<string>) => {
-        if (item.value === "back") {
-          showAccountsDialog(api);
-          return;
-        }
+      const now = Date.now();
+      const options: TuiDialogSelectOption<string>[] = [
+        ...accountInfoOptions(index, account, storage.activeIndex, now),
+        ...cachedQuotaOptions(account),
+        {
+          title: "Refresh quota",
+          value: `quota:${index}`,
+          category: "Actions",
+          description: "Fetch latest usage and reset windows for this account.",
+        },
+        {
+          title: "Verify account",
+          value: `verify:${index}`,
+          category: "Actions",
+          description: "Run verification and auth checks for this account.",
+        },
+        {
+          title: "Set as current",
+          value: `set-current:${index}`,
+          category: "Actions",
+          description: "Use this account as the active account.",
+          disabled: index === storage.activeIndex,
+        },
+        {
+          title: "Delete this account",
+          value: `delete:${index}`,
+          category: "Danger Zone",
+          description: "Remove this account from local storage.",
+        },
+        {
+          title: "Back",
+          value: "back",
+          category: "Navigation",
+        },
+      ];
 
-        if (item.value.startsWith("set-current:")) {
-          const target = Number.parseInt(item.value.split(":")[1] ?? "-1", 10);
-          setCurrentIndex(target)
-            .then((result) => {
-              api.ui.toast({
-                variant: result.ok ? "success" : "error",
-                message: result.message,
-              });
+      api.ui.dialog.setSize("xlarge");
+      api.ui.dialog.replace(() =>
+        createDialogSelect(api, {
+          title: accountTitle(index, account),
+          options,
+          onSelect: (item: TuiDialogSelectOption<string>) => {
+            if (item.value === "back") {
               showAccountsDialog(api);
-            })
-            .catch((error) => {
-              api.ui.toast({
-                variant: "error",
-                message: error instanceof Error ? error.message : "Failed to update account",
-              });
-              showAccountsDialog(api);
-            });
-          return;
-        }
+              return;
+            }
 
-        if (item.value.startsWith("verify:")) {
-          const target = Number.parseInt(item.value.split(":")[1] ?? "-1", 10);
-          void runVerifyOne(api, target);
-          return;
-        }
+            if (item.value.startsWith("quota:")) {
+              const target = Number.parseInt(item.value.split(":")[1] ?? "-1", 10);
+              void runQuotaCheck(api, target, () => showAccountActions(api, target));
+              return;
+            }
 
-        if (item.value.startsWith("delete:")) {
-          const target = Number.parseInt(item.value.split(":")[1] ?? "-1", 10);
-          removeAccountByIndex(target)
-            .then((result) => {
-              api.ui.toast({
-                variant: result.ok ? "success" : "error",
-                message: result.message,
-              });
-              showAccountsDialog(api);
-            })
-            .catch((error) => {
-              api.ui.toast({
-                variant: "error",
-                message: error instanceof Error ? error.message : "Failed to delete account",
-              });
-              showAccountsDialog(api);
-            });
-        }
-      },
-    }),
-  );
+            if (item.value.startsWith("set-current:")) {
+              const target = Number.parseInt(item.value.split(":")[1] ?? "-1", 10);
+              setCurrentIndex(target)
+                .then((result) => {
+                  api.ui.toast({
+                    variant: result.ok ? "success" : "error",
+                    message: result.message,
+                  });
+                  showAccountActions(api, target);
+                })
+                .catch((error) => {
+                  api.ui.toast({
+                    variant: "error",
+                    message: error instanceof Error ? error.message : "Failed to update account",
+                  });
+                  showAccountActions(api, target);
+                });
+              return;
+            }
+
+            if (item.value.startsWith("verify:")) {
+              const target = Number.parseInt(item.value.split(":")[1] ?? "-1", 10);
+              void runVerifyOne(api, target);
+              return;
+            }
+
+            if (item.value.startsWith("delete:")) {
+              const target = Number.parseInt(item.value.split(":")[1] ?? "-1", 10);
+              removeAccountByIndex(target)
+                .then((result) => {
+                  api.ui.toast({
+                    variant: result.ok ? "success" : "error",
+                    message: result.message,
+                  });
+                  showAccountsDialog(api);
+                })
+                .catch((error) => {
+                  api.ui.toast({
+                    variant: "error",
+                    message: error instanceof Error ? error.message : "Failed to delete account",
+                  });
+                  showAccountsDialog(api);
+                });
+            }
+          },
+        }),
+      );
+    })
+    .catch((error) => {
+      api.ui.toast({
+        variant: "error",
+        message: error instanceof Error ? error.message : "Failed to load account",
+      });
+      showAccountsDialog(api);
+    });
 }
 
 function buildOptions(storage: AccountStorageV4 | null): TuiDialogSelectOption<string>[] {
@@ -996,43 +1300,43 @@ function buildOptions(storage: AccountStorageV4 | null): TuiDialogSelectOption<s
       title: "Add account",
       value: "action:add",
       category: "Actions",
-      description: "Run Google OAuth flow in the Antigravity account manager",
+      description: "Launch the Google OAuth flow for a new Antigravity account.",
     },
     {
       title: "Check quotas",
       value: "action:quota",
       category: "Actions",
-      description: "Check usage and reset windows for all stored accounts",
+      description: "Refresh usage and reset windows for all enabled accounts.",
     },
     {
       title: "Verify all accounts",
       value: "action:verify-all",
       category: "Actions",
-      description: "Run verification checks across every stored account",
+      description: "Check auth and verification state across every account.",
     },
     {
       title: "Configure models",
       value: "action:configure-models",
       category: "Actions",
-      description: "Write Antigravity model definitions to opencode.json",
+      description: "Write Antigravity model definitions into opencode.json.",
     },
     {
       title: "Enable load balancer defaults",
       value: "action:enable-load-balancer",
       category: "Actions",
-      description: "Set hybrid + cache_first + pid_offset_disabled in plugin config",
+      description: "Apply the hybrid/cache-first baseline preset.",
     },
     {
       title: "Load balancer settings",
       value: "action:load-balancer-settings",
       category: "Actions",
-      description: "Granular tuning for strategy, scheduling, retries, jitter, and quota windows",
+      description: "Tune strategy, retries, jitter, and quota behavior.",
     },
     {
       title: "Reload",
       value: "action:reload",
       category: "Actions",
-      description: "Refresh account list from disk",
+      description: "Reload the account pool from disk.",
     },
   ];
 
@@ -1042,7 +1346,6 @@ function buildOptions(storage: AccountStorageV4 | null): TuiDialogSelectOption<s
       value: "info:none",
       category: "Accounts",
       description: "Select Add account to create your first Antigravity account",
-      disabled: true,
     });
     return list;
   }
@@ -1053,10 +1356,10 @@ function buildOptions(storage: AccountStorageV4 | null): TuiDialogSelectOption<s
       continue;
     }
     list.push({
-      title: accountLabel(i, account, storage.activeIndex, now),
+      title: accountTitle(i, account),
       value: `account:${i}`,
       category: "Accounts",
-      description: "Press Enter to open actions for this account",
+      description: accountSummary(i, account, storage.activeIndex, now),
     });
   }
 
@@ -1073,7 +1376,7 @@ function buildOptions(storage: AccountStorageV4 | null): TuiDialogSelectOption<s
 function handleMainAction(api: TuiApi, value: string): void {
   switch (value) {
     case "action:add":
-      openProviderConnect(api, "Select Google → OAuth with Google (Antigravity), then choose Add account.");
+      openProviderConnect(api, "Select Google -> OAuth with Google (Antigravity), then choose Add account.");
       break;
     case "action:quota":
       void runQuotaCheck(api);
@@ -1130,7 +1433,7 @@ function showAccountsDialog(api: TuiApi): void {
   loadAccounts()
     .then((storage) => {
       const options = buildOptions(storage);
-      api.ui.dialog.setSize("large");
+      api.ui.dialog.setSize("xlarge");
       api.ui.dialog.replace(() =>
         createDialogSelect(api, {
           title: "Antigravity Accounts",
@@ -1156,7 +1459,18 @@ function showAccountsDialog(api: TuiApi): void {
     });
 }
 
-const tui = async (api: TuiApi): Promise<void> => {
+const tui = async (api: TuiApi, options?: Record<string, unknown>): Promise<void> => {
+  const effectiveOptions = options ?? resolvePluginOptionsFromState(api);
+  const config = mergeRuntimeOptions(loadConfig(api.state.path.directory), effectiveOptions);
+  initRuntimeConfig(config);
+  initializeDebug(config);
+  log.debug("tui-init", {
+    directory: api.state.path.directory,
+    optionsSource: options ? "runtime" : effectiveOptions ? "state.config" : "default",
+    hasAppDir: !!config.app_dir,
+    debug: config.debug,
+    debugTui: config.debug_tui,
+  });
   api.command.register(() => [
     {
       title: "Antigravity Accounts",

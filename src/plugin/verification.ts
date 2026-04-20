@@ -4,10 +4,12 @@ import {
   getAntigravityHeaders,
 } from "../constants";
 import { formatRefreshParts, parseRefreshParts } from "./auth";
+import { resolveCachedAuth } from "./cache";
 import { resolveCloudCodeBaseUrl } from "./cloud-code";
 import { ensureProjectContext } from "./project";
+import { initAntigravityRuntimeMetadata } from "./runtime-metadata";
 import { AntigravityTokenRefreshError, refreshAccessToken } from "./token";
-import type { PluginClient } from "./types";
+import type { OAuthAuthDetails, PluginClient } from "./types";
 
 export type VerificationProbeResult =
   | { status: "ok"; message: string }
@@ -56,6 +58,7 @@ function extractUrls(text: string): string[] {
 function pickVerificationUrl(urls: string[]): string | undefined {
   const list = urls
     .map((url) => url.trim())
+    .filter((url) => /^https?:\/\//i.test(url))
     .filter(Boolean);
   const preferred = list.find((url) => /verify|verification|accounts\.google\.com/i.test(url));
   return preferred ?? list[0];
@@ -95,6 +98,37 @@ export function extractVerificationErrorDetails(body: string): {
   const verificationUrls = new Set<string>();
   const visited = new Set<unknown>();
 
+  const extractFromStructuredError = (payload: unknown): void => {
+    if (!payload || typeof payload !== "object") {
+      return;
+    }
+    const error = (payload as { error?: { details?: unknown[]; message?: string } }).error;
+    if (!error || !Array.isArray(error.details)) {
+      return;
+    }
+
+    for (const detail of error.details) {
+      const typed = detail as {
+        "@type"?: string;
+        reason?: string;
+        metadata?: Record<string, unknown>;
+      };
+      if (typed?.["@type"] !== "type.googleapis.com/google.rpc.ErrorInfo") {
+        continue;
+      }
+
+      if (typed.reason === "VALIDATION_REQUIRED") {
+        validationRequired = true;
+      }
+
+      const metadata = typed.metadata ?? {};
+      const validationUrl = metadata.validation_url;
+      if (typeof validationUrl === "string" && /^https?:\/\//i.test(validationUrl.trim())) {
+        verificationUrls.add(validationUrl.trim());
+      }
+    }
+  };
+
   const walk = (value: unknown, key?: string): void => {
     if (typeof value === "string") {
       const normalized = decodeEscapedText(value);
@@ -110,8 +144,7 @@ export function extractVerificationErrorDetails(body: string): {
       if (
         lowerKey.includes("validation_url") ||
         lowerKey.includes("verify_url") ||
-        lowerKey.includes("verification_url") ||
-        lowerKey === "url"
+        lowerKey.includes("verification_url")
       ) {
         verificationUrls.add(normalized);
       }
@@ -139,6 +172,7 @@ export function extractVerificationErrorDetails(body: string): {
   };
 
   for (const payload of payloads) {
+    extractFromStructuredError(payload);
     walk(payload);
   }
 
@@ -168,12 +202,13 @@ export async function verifyAccountAccess(
   client: PluginClient,
   providerId: string,
 ): Promise<VerificationProbeResult> {
+  await initAntigravityRuntimeMetadata();
   const parsed = parseRefreshParts(account.refreshToken);
   if (!parsed.refreshToken) {
     return { status: "error", message: "Missing refresh token for selected account." };
   }
 
-  const auth = {
+  const auth = resolveCachedAuth({
     type: "oauth" as const,
     refresh: formatRefreshParts({
       refreshToken: parsed.refreshToken,
@@ -183,7 +218,7 @@ export async function verifyAccountAccess(
     }),
     access: "",
     expires: 0,
-  };
+  });
 
   let refreshedAuth: Awaited<ReturnType<typeof refreshAccessToken>>;
   try {
@@ -199,7 +234,17 @@ export async function verifyAccountAccess(
     return { status: "error", message: "Could not refresh access token for this account." };
   }
 
-  const projectContext = await ensureProjectContext(refreshedAuth);
+  return probeRefreshedAccountAccess(refreshedAuth);
+}
+
+export async function probeRefreshedAccountAccess(
+  auth: OAuthAuthDetails,
+): Promise<VerificationProbeResult> {
+  if (!auth.access) {
+    return { status: "error", message: "Could not refresh access token for this account." };
+  }
+
+  const projectContext = await ensureProjectContext(auth);
 
   const headers: Record<string, string> = {
     Authorization: `Bearer ${projectContext.auth.access}`,

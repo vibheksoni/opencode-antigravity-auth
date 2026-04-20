@@ -111,6 +111,20 @@ export const AntigravityConfigSchema = z.object({
    * @default OS-specific config dir + "/antigravity-logs"
    */
   log_dir: z.string().optional(),
+
+  /**
+   * Custom Antigravity app directory to read runtime metadata from.
+   *
+   * Use this only when the installed Antigravity app is not in the standard
+   * Windows location. The normal default is the installed client under
+   * %LOCALAPPDATA%\Programs\Antigravity.
+   *
+   * Env override: OPENCODE_ANTIGRAVITY_APP_DIR
+   */
+  app_dir: z
+    .string()
+    .optional()
+    .describe("Optional custom Antigravity app directory. Defaults to the installed client under %LOCALAPPDATA%\\Programs\\Antigravity on Windows."),
   
   // =========================================================================
   // Thinking Blocks
@@ -451,9 +465,10 @@ export const DEFAULT_CONFIG: AntigravityConfig = {
   toast_scope: 'root_only',
   debug: false,
   debug_tui: false,
+  app_dir: undefined,
   keep_thinking: false,
   session_recovery: true,
-  auto_resume: true,
+  auto_resume: false,
   resume_text: "continue",
   empty_response_max_attempts: 4,
   empty_response_retry_delay_ms: 2000,

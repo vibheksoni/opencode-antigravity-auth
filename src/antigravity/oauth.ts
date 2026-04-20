@@ -1,5 +1,3 @@
-import { OAuth2Client } from "google-auth-library";
-
 import {
   ANTIGRAVITY_REDIRECT_URI,
   ANTIGRAVITY_SCOPES,
@@ -10,6 +8,7 @@ import {
   GEMINI_CLI_HEADERS,
 } from "../constants";
 import { getCloudCodeEndpointOrder } from "../plugin/cloud-code";
+import { createGoogleOAuth2Client } from "../plugin/google-auth";
 import { createLogger } from "../plugin/logger";
 import { calculateTokenExpiry, formatRefreshParts } from "../plugin/auth";
 
@@ -110,7 +109,7 @@ function decodeState(state: string): AntigravityAuthState {
   };
 }
 
-function createOAuthClient(options: OAuthClientOptions): OAuth2Client {
+async function createOAuthClient(options: OAuthClientOptions) {
   const clientId = getAntigravityClientId(options.isGcpTos);
   const clientSecret = getAntigravityClientSecret(options.isGcpTos);
   if (!clientId || !clientSecret) {
@@ -118,7 +117,7 @@ function createOAuthClient(options: OAuthClientOptions): OAuth2Client {
       "Antigravity OAuth client metadata is unavailable. Install the local Antigravity app or set OPENCODE_ANTIGRAVITY_CLIENT_ID / OPENCODE_ANTIGRAVITY_CLIENT_SECRET (and the GCP ToS equivalents if needed).",
     );
   }
-  return new OAuth2Client(clientId, clientSecret, options.redirectUri);
+  return createGoogleOAuth2Client(clientId, clientSecret, options.redirectUri);
 }
 
 /**
@@ -129,7 +128,7 @@ export async function authorizeAntigravity(
   options: { redirectUri?: string; isGcpTos?: boolean } = {},
 ): Promise<AntigravityAuthorization> {
   const redirectUri = options.redirectUri?.trim() || ANTIGRAVITY_REDIRECT_URI;
-  const client = createOAuthClient({
+  const client = await createOAuthClient({
     redirectUri,
     isGcpTos: options.isGcpTos,
   });
@@ -246,7 +245,7 @@ export async function exchangeAntigravity(
   try {
     const { projectId } = decodeState(state);
     const redirectUri = options.redirectUri?.trim() || ANTIGRAVITY_REDIRECT_URI;
-    const client = createOAuthClient({
+    const client = await createOAuthClient({
       redirectUri,
       isGcpTos: options.isGcpTos,
     });

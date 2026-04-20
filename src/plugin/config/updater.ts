@@ -59,6 +59,9 @@ function stripJsonCommentsAndTrailingCommas(json: string): string {
  * Get the opencode config directory path.
  */
 export function getOpencodeConfigDir(): string {
+  if (process.env.OPENCODE_CONFIG_DIR?.trim()) {
+    return process.env.OPENCODE_CONFIG_DIR.trim();
+  }
   const xdgConfig = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
   return join(xdgConfig, "opencode");
 }

@@ -1,76 +1,124 @@
 # opencode-antigravity-auth
 
-Antigravity auth and runtime plugin for OpenCode.
+Antigravity auth, account management, quota inspection, runtime metadata extraction, and bridge support for OpenCode.
 
-This repo contains the current local implementation for:
+This is one of the best-maintained Antigravity plugins for OpenCode. The focus is simple: stay as close as possible to the real installed Antigravity app instead of hardcoding brittle request behavior.
 
-- Google OAuth login against Antigravity-compatible flows
-- multi-account persistence and rotation
-- Cloud Code endpoint routing
-- runtime Antigravity metadata extraction from the local app
-- runtime model discovery with safe fallback behavior
+> [!IMPORTANT]
+> The Antigravity language server and headless bridge path is the most stable way to use Antigravity from OpenCode.
+> If you want the behavior closest to the IDE, use the installed Antigravity app and let this plugin read its runtime metadata and language server binaries.
+> Looser request-only paths drift faster, hit rate limits sooner, and are more likely to cause account-state problems or bans.
 
-## Overview
+## What This Plugin Does
 
-The plugin is designed to make OpenCode behave more like the local Antigravity IDE integration.
+- Google OAuth login for Antigravity-compatible accounts
+- Multi-account storage, rotation, quota inspection, and verification
+- Runtime metadata extraction from the installed Antigravity app
+- Bridge support for the Antigravity language server and headless flows
+- Runtime model discovery with safe fallback catalogs
+- `/ag-accounts` TUI for account management inside OpenCode
 
-Current focus areas:
+## Requirements
 
-- `google-auth-library` OAuth flow instead of a hand-rolled exchange path
-- dynamic localhost OAuth callback port
-- support for both the standard and GCP ToS OAuth client pairs
-- local app metadata extraction from the installed Antigravity app before falling back to baked-in defaults
-- Antigravity runtime model discovery without breaking when discovery is denied
+- Windows is the primary supported path for the Antigravity bridge and local app discovery
+- Node.js 20+
+- Bun available if you want to run the local helper commands exactly as documented below
+- An installed Antigravity app if you want runtime metadata extraction and the most stable bridge behavior
 
-## Install
+Default installed Antigravity app root on Windows:
 
-### 1. Clone the repo
+```text
+C:\Users\<you>\AppData\Local\Programs\Antigravity\resources\app
+```
+
+## Quick Start
+
+### 1. Clone and install
 
 ```powershell
 git clone https://github.com/vibheksoni/opencode-antigravity-auth.git
 cd opencode-antigravity-auth
+npm install
+npm run build
 ```
 
-### 2. Install dependencies
+### 2. Add the plugin to OpenCode
 
-```powershell
-$env:NODE_ENV=''
-npm install --include=dev
+Use the active `opencode.json` or `opencode.jsonc`.
+
+Common locations:
+
+- project-local: `<workspace>\.opencode\opencode.json`
+- custom config dir: `%OPENCODE_CONFIG_DIR%\opencode.json`
+- default user config: `%USERPROFILE%\.config\opencode\opencode.json`
+
+Local development example:
+
+```json
+{
+  "plugin": [
+    [
+      "C:\\absolute\\path\\to\\opencode-antigravity-auth",
+      {
+        "force_headless": true,
+        "cleanup_on_exit": true,
+        "debug": true
+      }
+    ]
+  ]
+}
 ```
 
-### 3. Build the plugin
+Published plugin example:
 
-```powershell
-bun run build
+```json
+{
+  "plugin": [
+    [
+      "opencode-antigravity-auth@latest",
+      {
+        "force_headless": true,
+        "cleanup_on_exit": true
+      }
+    ]
+  ]
+}
 ```
 
-## Setup In OpenCode
+Default tuple plugin behavior when these values are omitted:
 
-### 1. Add the plugin to your OpenCode config
+- `force_headless: true`
+- `cleanup_on_exit: true`
+- `debug: false`
+- `single_headless: false`
+- `app_dir: auto-detect from the installed Antigravity app`
 
-Add the local plugin path to your OpenCode config.
+### 3. Optional runtime config
+
+This plugin also reads its own config file:
+
+- project-local: `<workspace>\.opencode\antigravity.json`
+- user-level: `%OPENCODE_CONFIG_DIR%\antigravity.json` or `%USERPROFILE%\.config\opencode\antigravity.json`
 
 Example:
 
 ```json
 {
-  "plugin": [
-    "path/to/opencode-antigravity-auth"
-  ]
+  "debug": true,
+  "debug_tui": false,
+  "keep_thinking": false,
+  "session_recovery": true,
+  "auto_resume": false,
+  "account_selection_strategy": "hybrid",
+  "scheduling_mode": "cache_first",
+  "quota_refresh_interval_minutes": 15
 }
 ```
 
-### 2. Start OpenCode
+### 4. Start OpenCode and authenticate
 
 ```powershell
 opencode
-```
-
-### 3. Authenticate
-
-Inside OpenCode:
-
-```powershell
 opencode auth login
 ```
 
@@ -80,148 +128,244 @@ Choose:
 2. Method: `OAuth with Google (Antigravity)`
 3. OAuth client: `Standard` or `GCP ToS`
 
-### 4. Verify the provider registry
+### 5. Open the account manager
 
-```powershell
-opencode models google
+Inside OpenCode use:
+
+- `/ag-accounts`
+- `/ag`
+
+From there you can:
+
+- add accounts
+- verify accounts
+- check quotas
+- inspect per-account details
+- write model definitions into `opencode.json`
+- tune load balancer settings
+
+## Recommended Windows Setup
+
+If Antigravity is installed in the default Windows location, this is usually enough:
+
+```json
+{
+  "plugin": [
+    [
+      "opencode-antigravity-auth@latest"
+    ]
+  ]
+}
 ```
+
+If your Antigravity install lives elsewhere, add `app_dir`:
+
+```json
+{
+  "plugin": [
+    [
+      "opencode-antigravity-auth@latest",
+      {
+        "app_dir": "C:\\Users\\<you>\\AppData\\Local\\Programs\\Antigravity\\resources\\app",
+        "force_headless": true,
+        "cleanup_on_exit": true,
+        "debug": true
+      }
+    ]
+  ]
+}
+```
+
+## Config Sources
+
+There are two separate config layers:
+
+### OpenCode tuple plugin options
+
+These live in `opencode.json` or `opencode.jsonc` and control plugin registration plus bridge-oriented runtime options.
+
+Useful tuple options:
+
+- `app_dir`
+- `debug`
+- `log_dir`
+- `force_headless`
+- `single_headless`
+- `cleanup_on_exit`
+- `bridge.force_headless`
+- `bridge.single_headless`
+- `bridge.cleanup_on_exit`
+- `bridge.debug`
+- `bridge.log_dir`
+- `bridge.app_dir`
+
+If you do not set them, the bridge defaults are:
+
+- `force_headless: true`
+- `cleanup_on_exit: true`
+- `debug: false`
+- `single_headless: false`
+
+### `antigravity.json`
+
+This is the plugin's own runtime config file and controls behavior such as:
+
+- `keep_thinking`
+- `session_recovery`
+- `auto_resume`
+- `resume_text`
+- `account_selection_strategy`
+- `scheduling_mode`
+- `quota_refresh_interval_minutes`
+- `soft_quota_threshold_percent`
+- `cli_first`
+- `auto_update`
+
+## Bridge and LS Server Behavior
+
+Bridge mode uses the installed Antigravity app to discover:
+
+- runtime version
+- OAuth client IDs and secrets
+- language server binaries
+
+Windows language server binaries are expected under:
+
+```text
+<app_dir>\extensions\antigravity\bin
+```
+
+If the standard app install exists, you usually do not need to configure anything else.
+
+If you want the bridge to prefer a specific installed client or binary:
+
+- set tuple option `app_dir`
+- or set `OPENCODE_ANTIGRAVITY_APP_DIR`
+- or set `CODEIUM_LANGUAGE_SERVER_BIN` to a specific language server binary
 
 ## Standalone Account Helper
 
-If you want a direct account flow outside the OpenCode auth menu, use the helper CLI after building.
-
-Examples:
+After building, you can use the standalone helper:
 
 ```powershell
 bun run account
-bun run account -- --no-browser
-bun run account -- --gcp-tos
-```
-
-Available commands:
-
-```powershell
-bun run account -- help
+bun run account -- add
+bun run account -- add --no-browser
+bun run account -- add --gcp-tos
 bun run account -- list
 bun run account -- clear
 ```
 
-## Current Behavior
+## Environment Variables Actually Read by Runtime
 
-### OAuth
+These are the environment variables the code actually reads today.
 
-The plugin now uses `google-auth-library` for:
-
-- auth URL generation
-- authorization code exchange
-- token refresh
-
-It also supports:
-
-- dynamic localhost callback ports
-- standard Antigravity OAuth client pair
-- GCP ToS OAuth client pair
-
-### Local App Metadata Extraction
-
-At startup the plugin tries to discover live Antigravity runtime metadata from the local app.
-
-Sources checked:
-
-- installed Antigravity app
-- local formatted app copy
-- explicit override via `OPENCODE_ANTIGRAVITY_APP_DIR`
-
-It extracts:
-
-- `product.json` `ideVersion`
-- OAuth client IDs and secrets from `out/main.js`
-
-Fallback order:
-
-1. local app metadata
-2. explicit environment variables
-3. remote version fetch for version only
-4. current baked-in non-sensitive defaults
-
-Supported environment overrides:
+### Core plugin runtime
 
 - `OPENCODE_ANTIGRAVITY_APP_DIR`
 - `OPENCODE_ANTIGRAVITY_CLIENT_ID`
 - `OPENCODE_ANTIGRAVITY_CLIENT_SECRET`
 - `OPENCODE_ANTIGRAVITY_GCP_TOS_CLIENT_ID`
 - `OPENCODE_ANTIGRAVITY_GCP_TOS_CLIENT_SECRET`
+- `OPENCODE_ANTIGRAVITY_GCP_TOS`
+- `OPENCODE_ANTIGRAVITY_OAUTH_BIND`
+- `OPENCODE_ANTIGRAVITY_DEBUG`
+- `OPENCODE_ANTIGRAVITY_DEBUG_TUI`
+- `OPENCODE_ANTIGRAVITY_CONSOLE_LOG`
 
-### Model Handling
+### Bridge and headless runtime
 
-The plugin uses two model sources:
+- `OPENCODE_ANTIGRAVITY_BRIDGE_FORCE_HEADLESS`
+- `OPENCODE_ANTIGRAVITY_BRIDGE_DEBUG`
+- `OPENCODE_ANTIGRAVITY_BRIDGE_DEBUG_HEADLESS`
+- `OPENCODE_ANTIGRAVITY_BRIDGE_BASE_URL`
+- `CODEIUM_LANGUAGE_SERVER_BIN`
 
-- static fallback provider models already present in the Google provider config
-- runtime-discovered Antigravity models from `fetchAvailableModels`
+### OpenCode pathing and auth storage
 
-Important behavior:
+- `OPENCODE_CONFIG_DIR`
+- `OPENCODE_GLOBAL_DATA_DIR`
 
-- runtime-discovered models are merged into the provider registry
-- if discovery fails or returns `403`, the static fallback catalog is kept
-- runtime-discovered entries are converted into full OpenCode provider model objects
+### Other runtime knobs
 
-## Important Files
+- `OPENCODE_IMAGE_ASPECT_RATIO`
 
-| File | Purpose |
-| --- | --- |
-| `src/plugin.ts` | Main plugin auth/provider/runtime flow |
-| `src/antigravity/oauth.ts` | OAuth URL generation and token exchange |
-| `src/plugin/token.ts` | Refresh flow |
-| `src/plugin/project.ts` | Project bootstrap and `loadCodeAssist` handling |
-| `src/plugin/cloud-code.ts` | Cloud Code endpoint selection |
-| `src/plugin/runtime-metadata.ts` | Local app metadata extraction |
-| `src/plugin/model-catalog.ts` | Runtime model discovery |
-| `src/plugin/account-persistence.ts` | Shared account save and dedupe logic |
-| `src/cli/account.ts` | Standalone account helper |
+Important nuance:
 
-## Build And Test
+- `quiet_mode`, `toast_scope`, `log_dir`, `account_selection_strategy`, `scheduling_mode`, and similar knobs are runtime config keys
+- some source comments still mention env overrides for those keys
+- the list above is the set of env vars actually read directly by runtime code today
+
+## Debug Logs
+
+Debug files go under:
+
+- `%OPENCODE_CONFIG_DIR%\antigravity-logs` when `OPENCODE_CONFIG_DIR` is set
+- otherwise `%USERPROFILE%\.config\opencode\antigravity-logs`
+
+The TUI config writer and `/ag-accounts` actions now also respect `OPENCODE_CONFIG_DIR`, so source-mode and wrapper launches update the same config root the runtime is using.
+
+Useful markers in the debug logs:
+
+- `tui-init`
+- `tui-quota-open`
+- `tui-quota-results`
+- `token-refresh-start`
+- `token-refresh-success`
+- `token-refresh-interop-fallback`
+- `quota-check-error`
+- `bridge-headless-started`
+- `bridge-account-selected`
+- `bridge-chat-success`
+
+## Configure Models from the TUI
+
+`/ag-accounts -> Configure models` writes plugin model definitions into the active OpenCode config file.
+
+That action now respects:
+
+1. `OPENCODE_CONFIG_DIR`
+2. existing `opencode.jsonc`
+3. existing `opencode.json`
+
+It will not silently write to the wrong config root when you are launching OpenCode from a custom wrapper or source checkout.
+
+## Build and Test
 
 Build:
 
 ```powershell
-$env:NODE_ENV=''
-bun run build
+npm run build
 ```
 
-Full test run:
+Regenerate schema:
 
 ```powershell
-bun test
+npm run build:schema
 ```
 
-Targeted test run:
+Run tests:
 
 ```powershell
-bun test src/plugin/auth.test.ts
-bun test src/plugin/model-catalog.test.ts
-bun test src/plugin/request.test.ts
+npm test
 ```
 
-## Current Limitations
+Run targeted tests:
 
-This plugin is closer to the local Antigravity app than older versions, but it is still not a byte-for-byte recreation.
+```powershell
+npm test -- --run src/plugin/token.test.ts src/plugin/quota.test.ts src/plugin/logger.test.ts src/plugin/debug.test.ts
+npm test -- --run src/plugin/config/schema.test.ts src/plugin/config/updater.test.ts src/bridge/options.test.ts
+```
 
-Known remaining gaps:
+## Current Notes
 
-- enterprise admin-controls UX is not fully mirrored
-- project-picker UX is not fully recreated
-- some Antigravity UI and state-sync behavior is still app-specific
-
-## Safety
-
-This is unofficial integration code.
-
-- upstream app behavior can change
-- local app metadata extraction is best-effort
-- fallback paths are intentionally kept so the plugin still works when extraction fails
+- The plugin tries to extract runtime metadata from the local app first, then falls back cleanly
+- Model discovery can fail with live `403` responses on some accounts, so static fallback models remain important
+- Quota inspection merges Antigravity buckets with Gemini CLI quota reporting
+- The bridge keeps a headless fallback path because it matches the IDE more closely than direct request emulation
 
 ## Acknowledgements
 
 Credit to the original work at [NoeFabris/opencode-antigravity-auth](https://github.com/NoeFabris/opencode-antigravity-auth).
 
-That repo is outdated relative to this codebase. This version has diverged significantly and adds substantial fixes and improvements, including the newer OAuth flow, local app metadata extraction, runtime model handling, Windows-focused workflow support, and continued local maintenance.
+This repo has diverged significantly from that older implementation and continues to be maintained around the current Antigravity app behavior, Windows bridge support, runtime metadata extraction, quota tooling, and OpenCode integration.

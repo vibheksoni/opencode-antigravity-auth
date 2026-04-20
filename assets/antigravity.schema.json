@@ -32,6 +32,10 @@
       "type": "string",
       "description": "Custom directory for debug logs."
     },
+    "app_dir": {
+      "description": "Optional custom Antigravity app directory. Defaults to the installed client under %LOCALAPPDATA%\\Programs\\Antigravity on Windows.",
+      "type": "string"
+    },
     "keep_thinking": {
       "default": false,
       "type": "boolean",

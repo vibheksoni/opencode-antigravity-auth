@@ -9,8 +9,9 @@
  */
 
 import type { PluginClient } from "./types";
-import { isDebugTuiEnabled } from "./debug";
+import { isDebugEnabled, isDebugTuiEnabled, writeDebugLine } from "./debug";
 import {
+  formatErrorForLog,
   isTruthyFlag,
   writeConsoleLog,
 } from "./logging-utils";
@@ -59,7 +60,22 @@ export function initLogger(client: PluginClient): void {
 export function createLogger(module: string): Logger {
   const service = `antigravity.${module}`;
 
+  function formatLine(level: LogLevel, message: string, extra?: Record<string, unknown>): string {
+    if (!extra) {
+      return `[${service}] ${level.toUpperCase()} ${message}`;
+    }
+    try {
+      return `[${service}] ${level.toUpperCase()} ${message} ${JSON.stringify(extra)}`;
+    } catch (error) {
+      return `[${service}] ${level.toUpperCase()} ${message} ${formatErrorForLog(extra)} ${formatErrorForLog(error)}`;
+    }
+  }
+
   const log = (level: LogLevel, message: string, extra?: Record<string, unknown>): void => {
+    if (isDebugEnabled()) {
+      writeDebugLine(formatLine(level, message, extra));
+    }
+
     // TUI logging: controlled only by debug_tui policy
     if (isDebugTuiEnabled()) {
       const app = _client?.app;

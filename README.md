@@ -101,7 +101,61 @@ Default tuple plugin behavior when these values are omitted:
 - `single_headless: false`
 - `app_dir: auto-detect from the installed Antigravity app`
 
-### 3. Optional runtime config
+### 3. Add the TUI plugin on newer OpenCode versions
+
+Newer OpenCode builds load the server plugin and the TUI plugin separately.
+
+That means:
+
+- `opencode-antigravity-auth` handles the server/auth/runtime side
+- `opencode-antigravity-auth/tui` handles slash commands and the account manager UI
+
+If `bun run account -- list` works but `/ag-accounts` does not appear, the usual cause is that the TUI plugin was never added.
+
+Use the active `tui.json`.
+
+Common locations:
+
+- project-local: `<workspace>\.opencode\tui.json`
+- custom config dir: `%OPENCODE_CONFIG_DIR%\tui.json`
+- default user config: `%USERPROFILE%\.config\opencode\tui.json`
+
+Installed plugin example:
+
+```json
+{
+  "plugin": [
+    "opencode-antigravity-auth/tui"
+  ]
+}
+```
+
+Local path example:
+
+```json
+{
+  "plugin": [
+    "C:\\absolute\\path\\to\\opencode-antigravity-auth\\tui"
+  ]
+}
+```
+
+If your local setup expects the path-style spec exactly as a filesystem string, this form also works:
+
+```json
+{
+  "plugin": [
+    "C:\\absolute\\path\\to\\opencode-antigravity-auth/tui"
+  ]
+}
+```
+
+After adding the TUI entry, restart OpenCode and then use:
+
+- `/ag-accounts`
+- `/ag`
+
+### 4. Optional runtime config
 
 This plugin also reads its own config file:
 
@@ -123,7 +177,7 @@ Example:
 }
 ```
 
-### 4. Start OpenCode and authenticate
+### 5. Start OpenCode and authenticate
 
 ```powershell
 opencode
@@ -136,7 +190,7 @@ Choose:
 2. Method: `OAuth with Google (Antigravity)`
 3. OAuth client: `Standard` or `GCP ToS`
 
-### 5. Open the account manager
+### 6. Open the account manager
 
 Inside OpenCode use:
 
@@ -151,6 +205,24 @@ From there you can:
 - inspect per-account details
 - write model definitions into `opencode.json`
 - tune load balancer settings
+
+## TUI Setup Notes
+
+For current OpenCode releases, the separate TUI entry is important:
+
+- server plugin spec: `opencode-antigravity-auth`
+- TUI plugin spec: `opencode-antigravity-auth/tui`
+
+For local path installs:
+
+- server plugin path: `C:\path\to\opencode-antigravity-auth`
+- TUI plugin path: `C:\path\to\opencode-antigravity-auth\tui`
+
+Without the TUI plugin entry:
+
+- the standalone helper can still work
+- auth/runtime behavior may still exist
+- but `/ag-accounts` and other TUI-side commands will not load
 
 ## Recommended Windows Setup
 
